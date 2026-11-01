@@ -1,0 +1,86 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── Токены тем (light / dark) ──────────────────────────────────────────── */
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;
+    --border: 214 32% 91%;
+    --input: 214 32% 91%;
+    --ring: 221 83% 53%;
+    --primary: 221 83% 53%;
+    --primary-foreground: 210 40% 98%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 210 40% 98%;
+  }
+
+  .dark {
+    --background: 222 47% 11%;
+    --foreground: 210 40% 98%;
+    --card: 222 44% 13%;
+    --card-foreground: 210 40% 98%;
+    --muted: 217 33% 17%;
+    --muted-foreground: 215 20% 65%;
+    --border: 217 33% 22%;
+    --input: 217 33% 22%;
+    --ring: 217 91% 60%;
+    --primary: 217 91% 60%;
+    --primary-foreground: 222 47% 11%;
+    --destructive: 0 63% 50%;
+    --destructive-foreground: 210 40% 98%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: 'rlig' 1, 'calt' 1;
+  }
+}
+
+/* ─── KaTeX: корректный рендер формул в обеих темах ──────────────────────── */
+.katex-wrapper {
+  @apply overflow-x-auto py-1;
+}
+
+.katex {
+  color: inherit; /* формулы наследуют text-foreground */
+  font-size: 1.08em;
+}
+
+.katex-display {
+  @apply my-3;
+}
+
+.katex-display > .katex {
+  @apply text-center;
+}
+
+/* Блоки формул внутри тёмной темы не должны выбиваться по цвету */
+.dark .katex .mathnormal,
+.dark .katex .mord,
+.dark .katex .mbin,
+.dark .katex .mrel {
+  color: hsl(var(--foreground));
+}
+
+/* Скроллбар для широких формул */
+.katex-display::-webkit-scrollbar,
+.katex-wrapper::-webkit-scrollbar {
+  height: 6px;
+}
+
+.katex-display::-webkit-scrollbar-thumb,
+.katex-wrapper::-webkit-scrollbar-thumb {
+  @apply rounded-full bg-muted-foreground/30;
+}
