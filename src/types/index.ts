@@ -36,3 +36,34 @@ export interface ActionResult<T = undefined> {
   success?: boolean;
   data?: T;
 }
+
+/**
+ * DTO задачи для передачи на клиент (даты — ISO-строки).
+ */
+export interface TaskItemDTO {
+  id: string;
+  order: number;
+  content: string;
+  correctAnswer: string | null;
+  requirePhoto: boolean;
+}
+
+/**
+ * DTO домашнего задания для списка/просмотра.
+ */
+export interface HomeworkItemDTO {
+  id: string;
+  title: string;
+  description: string | null;
+  deadline: string | null; // ISO-string
+  createdAt: string; // ISO-string
+  tasksCount: number;
+  submissionsCount: number;
+}
+
+/**
+ * DTO ДЗ вместе с задачами (детальная страница).
+ */
+export interface HomeworkDetailDTO extends HomeworkItemDTO {
+  tasks: TaskItemDTO[];
+}
