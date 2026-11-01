@@ -45,7 +45,7 @@ export async function linkToTeacherAction(rawCode: string): Promise<LinkTeacherR
 
     await db.studentProfile.update({
       where: { id: studentProfile.id },
-       { teacherId: teacherProfile.id },
+      data: { teacherId: teacherProfile.id },
     });
 
     revalidatePath('/student/profile');
@@ -80,7 +80,7 @@ export async function unlinkTeacherAction(): Promise<LinkTeacherResult> {
 
     await db.studentProfile.update({
       where: { id: studentProfile.id },
-       { teacherId: null },
+      data: { teacherId: null },
     });
 
     revalidatePath('/student/profile');

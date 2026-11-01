@@ -53,6 +53,7 @@ model StudentProfile {
   userId    String   @unique
   fullName  String
   grade     String? // класс/курс, например "7Б"
+  notes     String? // заметки учителя об ученике (редактирует учитель)
   teacherId String? // nullable — до привязки к учителю
   createdAt DateTime @default(now())
 
