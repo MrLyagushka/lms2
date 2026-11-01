@@ -67,3 +67,28 @@ export interface HomeworkItemDTO {
 export interface HomeworkDetailDTO extends HomeworkItemDTO {
   tasks: TaskItemDTO[];
 }
+
+/**
+ * Статус решения ДЗ конкретным учеником:
+ *   NONE      — решения нет (ученик ещё не начинал)
+ *   DRAFT     — черновик (ученик уже начал решать)
+ *   SUBMITTED — отправлено учителю
+ *   CHECKED   — проверено учителем
+ */
+export type StudentHomeworkStatus = 'NONE' | 'DRAFT' | 'SUBMITTED' | 'CHECKED';
+
+/**
+ * DTO ДЗ для вкладки «Домашние задания» ученика.
+ * Включает имя учителя и статус решения текущим учеником.
+ */
+export interface StudentHomeworkItemDTO {
+  id: string;
+  title: string;
+  description: string | null;
+  deadline: string | null; // ISO-string
+  createdAt: string; // ISO-string
+  tasksCount: number;
+  teacherName: string;
+  status: StudentHomeworkStatus;
+  grade: string | null; // оценка, если ДЗ проверено
+}

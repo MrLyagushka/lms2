@@ -8,7 +8,13 @@ import { revalidatePath } from 'next/cache';
 import { db } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth';
 import { createHomeworkSchema } from '@/validators/homework.validator';
-import type { ActionResult, HomeworkItemDTO, HomeworkDetailDTO } from '@/types';
+import type {
+  ActionResult,
+  HomeworkItemDTO,
+  HomeworkDetailDTO,
+  StudentHomeworkItemDTO,
+  StudentHomeworkStatus,
+} from '@/types';
 
 // ─────────────── Внутренние guard-хелперы ───────────────
 
@@ -22,6 +28,18 @@ async function requireTeacherProfileId(): Promise<Guard> {
   const profile = await db.teacherProfile.findUnique({ where: { userId: session.userId } });
   if (!profile) return { error: 'Профиль учителя не найден' };
   return { profileId: profile.id };
+}
+
+type StudentGuard = { studentProfileId: string } | { error: string };
+
+async function requireStudentProfileId(): Promise<StudentGuard> {
+  const session = await getSessionUser();
+  if (!session || session.role !== 'STUDENT') {
+    return { error: 'Доступ только для учеников' };
+  }
+  const profile = await db.studentProfile.findUnique({ where: { userId: session.userId } });
+  if (!profile) return { error: 'Профиль ученика не найден' };
+  return { studentProfileId: profile.id };
 }
 
 function toHomeworkItem(hw: {
@@ -168,4 +186,82 @@ export async function deleteHomeworkAction(id: string): Promise<ActionResult> {
     console.error('deleteHomeworkAction error:', err);
     return { error: 'Не удалось удалить ДЗ. Попробуйте позже.' };
   }
+}
+
+// ─────────────── Список ДЗ для ученика (с статусом решения) ───────────────
+
+/**
+ * Возвращает все ДЗ учителя, к которому привязан текущий ученик,
+ * вместе со статусом решения этим учеником:
+ *   NONE — решения нет; DRAFT — черновик; SUBMITTED — отправлено; CHECKED — проверено.
+ *
+ * Особый случай: если у ученика нет привязанного учителя, возвращается
+ * success с пустым списком и teacherName === null — страница покажет баннер
+ * с предложением привязаться.
+ */
+export async function getStudentHomeworksAction(): Promise<
+  ActionResult<{ teacherName: string | null; homeworks: StudentHomeworkItemDTO[] }>
+> {
+  const guard = await requireStudentProfileId();
+  if ('error' in guard) return { error: guard.error };
+
+  const studentProfile = await db.studentProfile.findUnique({
+    where: { id: guard.studentProfileId },
+    include: { teacher: { select: { id: true, fullName: true } } },
+  });
+
+  if (!studentProfile) {
+    return { error: 'Профиль ученика не найден' };
+  }
+
+  // Учитель не привязан — ДЗ нет, но это не ошибка
+  if (!studentProfile.teacher) {
+    return { success: true, data: { teacherName: null, homeworks: [] } };
+  }
+
+  const homeworks = await db.homework.findMany({
+    where: { teacherId: studentProfile.teacher.id },
+    include: {
+      _count: { select: { tasks: true } },
+      submissions: {
+        where: { studentId: studentProfile.id },
+        select: { status: true, grade: true },
+        take: 1, // @@unique([studentId, homeworkId]) — не больше одной
+      },
+    },
+    orderBy: [{ deadline: 'asc' }, { createdAt: 'desc' }],
+  });
+
+  const items: StudentHomeworkItemDTO[] = (
+    homeworks as {
+      id: string;
+      title: string;
+      description: string | null;
+      deadline: Date | null;
+      createdAt: Date;
+      _count: { tasks: number };
+      submissions: { status: string; grade: string | null }[];
+    }[]
+  ).map((hw) => {
+    const submission = hw.submissions[0];
+    const status: StudentHomeworkStatus =
+      submission === undefined ? 'NONE' : (submission.status as StudentHomeworkStatus);
+
+    return {
+      id: hw.id,
+      title: hw.title,
+      description: hw.description,
+      deadline: hw.deadline ? hw.deadline.toISOString() : null,
+      createdAt: hw.createdAt.toISOString(),
+      tasksCount: hw._count.tasks,
+      teacherName: studentProfile.teacher!.fullName,
+      status,
+      grade: status === 'CHECKED' ? submission?.grade ?? null : null,
+    };
+  });
+
+  return {
+    success: true,
+    data: { teacherName: studentProfile.teacher.fullName, homeworks: items },
+  };
 }
