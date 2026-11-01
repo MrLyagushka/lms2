@@ -45,3 +45,14 @@ export const saveAnswerSchema = z.object({
 });
 
 export type SaveAnswerInput = z.infer<typeof saveAnswerSchema>;
+
+/**
+ * Выставление оценки учителем (ПРОМТ-14): обязательная оценка,
+ * необязательный комментарий.
+ */
+export const gradeSubmissionSchema = z.object({
+  grade: z.string().trim().min(1, 'Оценка обязательна').max(20, 'Максимум 20 символов'),
+  comment: z.string().trim().max(2000, 'Максимум 2000 символов').optional(),
+});
+
+export type GradeSubmissionInput = z.infer<typeof gradeSubmissionSchema>;

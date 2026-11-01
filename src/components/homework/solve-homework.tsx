@@ -16,6 +16,7 @@ import {
   AlertCircle,
   CalendarClock,
   CheckCircle2,
+  Clock,
   CloudUpload,
   Loader2,
   RefreshCw,
@@ -23,6 +24,7 @@ import {
   Send,
   User,
   X,
+  XCircle,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -36,7 +38,7 @@ import {
   submitHomeworkAction,
   uploadPhotoAction,
 } from '@/server/homework.actions';
-import type { StudentHomeworkSolveDTO, TaskItemDTO } from '@/types';
+import type { AutoCheckResult, StudentHomeworkSolveDTO, TaskItemDTO } from '@/types';
 
 // ─────────────── Индикатор статуса автосохранения ───────────────
 
@@ -83,6 +85,8 @@ interface TaskBlockProps {
   initialText: string;
   initialPhotoUrl: string | null;
   isCorrect: boolean | null;
+  /** Есть ли у задачи эталон для автопроверки (correctAnswer). */
+  hasCorrectAnswer: boolean;
   /** Вызывается после успешного сохранения; может вернуть id созданной Submission. */
   onSaved: (submissionId: string) => void;
   getSubmissionId: () => string | null;
@@ -94,6 +98,7 @@ function TaskBlock({
   initialText,
   initialPhotoUrl,
   isCorrect,
+  hasCorrectAnswer,
   onSaved,
   getSubmissionId,
 }: TaskBlockProps) {
@@ -160,10 +165,20 @@ function TaskBlock({
     }
   }, [getSubmissionId, onSaved, task.id]);
 
+  // Подсветка карточки по результату автопроверки (ПРОМТ-14):
+  // зелёная — верно, красная — неверно; без эталона в режиме чтения — «на проверке»
+  const cardTone = !readOnly
+    ? undefined
+    : isCorrect === true
+      ? 'border-emerald-500/60 bg-emerald-500/5'
+      : isCorrect === false
+        ? 'border-red-500/60 bg-red-500/5'
+        : undefined;
+
   return (
-    <Card>
+    <Card className={cardTone}>
       <CardHeader>
-        <div className="flex items-start justify-between gap-2">
+        <div className="flex flex-wrap items-start justify-between gap-2">
           <CardTitle className="text-base">
             Задача {task.order}
             {task.requirePhoto && (
@@ -172,9 +187,25 @@ function TaskBlock({
               </Badge>
             )}
           </CardTitle>
-          {/* Результат автопроверки (виден, когда ДЗ проверено) */}
-          {readOnly && isCorrect === true && <Badge variant="success">Верно</Badge>}
-          {readOnly && isCorrect === false && <Badge variant="warning">Неверно</Badge>}
+          {/* Результат автопроверки */}
+          {readOnly && isCorrect === true && (
+            <Badge variant="success" className="gap-1">
+              <CheckCircle2 className="h-3 w-3" />
+              Верно
+            </Badge>
+          )}
+          {readOnly && isCorrect === false && (
+            <Badge variant="destructive" className="gap-1">
+              <XCircle className="h-3 w-3" />
+              Неверно
+            </Badge>
+          )}
+          {readOnly && isCorrect === null && !hasCorrectAnswer && (
+            <Badge variant="outline" className="gap-1">
+              <Clock className="h-3 w-3" />
+              Отправлено на проверку
+            </Badge>
+          )}
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -283,6 +314,10 @@ export function SolveHomework({ homework }: { homework: StudentHomeworkSolveDTO 
   const [status, setStatus] = useState<'DRAFT' | 'SUBMITTED' | 'CHECKED'>(
     homework.submission?.status ?? 'DRAFT'
   );
+  // Результат автопроверки после отправки (ПРОМТ-14) — обновляется сервером при refresh
+  const [autoCheck, setAutoCheck] = useState<AutoCheckResult | null>(
+    homework.submission?.autoCheck ?? null
+  );
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -324,9 +359,18 @@ export function SolveHomework({ homework }: { homework: StudentHomeworkSolveDTO 
     setSubmitError(null);
     startTransition(async () => {
       const result = await submitHomeworkAction(submissionId);
-      if (result.success) {
+      if (result.success && result.data) {
         setStatus('SUBMITTED');
-        showToast('ДЗ отправлено учителю ✅');
+        setAutoCheck({
+          correct: result.data.correct,
+          autoChecked: result.data.autoChecked,
+          totalTasks: result.data.totalTasks,
+        });
+        showToast(
+          result.data.autoChecked > 0
+            ? `ДЗ отправлено. Правильных ответов: ${result.data.correct} из ${result.data.autoChecked}`
+            : 'ДЗ отправлено учителю ✅'
+        );
         router.refresh();
       } else {
         setSubmitError(result.error ?? 'Не удалось отправить ДЗ. Проверьте соединение.');
@@ -401,6 +445,11 @@ export function SolveHomework({ homework }: { homework: StudentHomeworkSolveDTO 
                   </>
                 )}
               </p>
+              {homework.submission?.comment && (
+                <p className="mt-1 text-sm text-foreground">
+                  Комментарий учителя: <span className="italic">{homework.submission.comment}</span>
+                </p>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -424,6 +473,22 @@ export function SolveHomework({ homework }: { homework: StudentHomeworkSolveDTO 
         </Card>
       )}
 
+      {/* Результат автопроверки (ПРОМТ-14): «Правильных ответов: X из Y» */}
+      {readOnly && autoCheck && autoCheck.autoChecked > 0 && (
+        <Card className="border-primary/30">
+          <CardContent className="flex flex-wrap items-center justify-between gap-2 py-4">
+            <p className="text-sm font-medium text-foreground">
+              Правильных ответов: {autoCheck.correct} из {autoCheck.autoChecked}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {autoCheck.totalTasks - autoCheck.autoChecked > 0
+                ? `${autoCheck.totalTasks - autoCheck.autoChecked} задач без автопроверки — их оценит учитель`
+                : 'Все задачи проверены автоматически'}
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Задачи */}
       <div className="space-y-4">
         {homework.tasks.map((task) => {
@@ -436,6 +501,7 @@ export function SolveHomework({ homework }: { homework: StudentHomeworkSolveDTO 
               initialText={answer?.textAnswer ?? ''}
               initialPhotoUrl={answer?.photoUrl ?? null}
               isCorrect={answer?.isCorrect ?? null}
+              hasCorrectAnswer={task.correctAnswer !== null}
               onSaved={handleSaved}
               getSubmissionId={getSubmissionId}
             />

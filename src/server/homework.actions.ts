@@ -12,7 +12,7 @@ import path from 'path';
 import { revalidatePath } from 'next/cache';
 import { db } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth';
-import { createHomeworkSchema, saveAnswerSchema } from '@/validators/homework.validator';
+import { createHomeworkSchema, saveAnswerSchema, gradeSubmissionSchema } from '@/validators/homework.validator';
 import type {
   ActionResult,
   HomeworkItemDTO,
@@ -20,7 +20,40 @@ import type {
   StudentHomeworkItemDTO,
   StudentHomeworkSolveDTO,
   StudentHomeworkStatus,
+  TeacherHomeworkReviewDTO,
+  SubmissionReviewDTO,
 } from '@/types';
+
+// ─────────────── Автопроверка ответов (ПРОМТ-14) ───────────────
+
+/**
+ * Нормализация ответа для автопроверки:
+ * trim, lowercase, удаление всех пробелов (в т.ч. вокруг операторов),
+ * нормализация минуса/умножения и десятичного разделителя.
+ */
+export function normalizeAnswer(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s\u00A0]+/g, '') // игнорируем пробелы вокруг операторов и внутри
+    .replace(/[−–—]/g, '-') // все виды минусов → обычный дефис
+    .replace(/[×✕∗*]/g, 'x') // знаки умножения → x
+    .replace(/,/g, '.'); // запятая как десятичный разделитель → точка
+}
+
+/** Сравнивает ответ ученика с эталоном (после нормализации). */
+export function checkAnswer(textAnswer: string | null | undefined, correctAnswer: string): boolean {
+  if (textAnswer === null || textAnswer === undefined) return false;
+  const a = normalizeAnswer(textAnswer);
+  const b = normalizeAnswer(correctAnswer);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  // Числовое сравнение: "3" и "3.0", "1/2" и "0.5" считаются равными
+  const na = Number(a);
+  const nb = Number(b);
+  if (Number.isFinite(na) && Number.isFinite(nb)) return na === nb;
+  return false;
+}
 
 // ─────────────── Внутренние guard-хелперы ───────────────
 
@@ -338,18 +371,27 @@ export async function getHomeworkForStudentAction(
       requirePhoto: t.requirePhoto,
     })),
     submission: submission
-      ? {
-          id: submission.id,
-          status: submission.status as 'DRAFT' | 'SUBMITTED' | 'CHECKED',
-          submittedAt: submission.submittedAt ? submission.submittedAt.toISOString() : null,
-          grade: submission.grade,
-          answers: submission.answers.map((a) => ({
-            taskId: a.taskId,
-            textAnswer: a.textAnswer,
-            photoUrl: a.photoUrl,
-            isCorrect: a.isCorrect,
-          })),
-        }
+      ? (() => {
+          const autoChecked = homework.tasks.filter((t) => t.correctAnswer !== null).length;
+          const correctCount = submission.answers.filter((a) => a.isCorrect === true).length;
+          const wasSubmitted = submission.status !== 'DRAFT';
+          return {
+            id: submission.id,
+            status: submission.status as 'DRAFT' | 'SUBMITTED' | 'CHECKED',
+            submittedAt: submission.submittedAt ? submission.submittedAt.toISOString() : null,
+            grade: submission.grade,
+            comment: submission.comment,
+            autoCheck: wasSubmitted
+              ? { correct: correctCount, autoChecked, totalTasks: homework.tasks.length }
+              : null,
+            answers: submission.answers.map((a) => ({
+              taskId: a.taskId,
+              textAnswer: a.textAnswer,
+              photoUrl: a.photoUrl,
+              isCorrect: a.isCorrect,
+            })),
+          };
+        })()
       : null,
   };
 
@@ -429,11 +471,23 @@ export async function saveAnswerAction(
 }
 
 /**
- * Отправка ДЗ: DRAFT -> SUBMITTED, фиксируется submittedAt.
+ * Отправка ДЗ (ПРОМТ-14):
+ *  - DRAFT -> SUBMITTED, фиксируется submittedAt;
+ *  - автопроверка: для каждого ответа, у задачи которого есть correctAnswer,
+ *    сравниваем textAnswer с эталоном (нормализация: trim, lowercase,
+ *    игнорирование пробелов вокруг операторов) и записываем isCorrect;
+ *  - возвращает результат: сколько верно / сколько всего (auto + manual).
  */
 export async function submitHomeworkAction(
   submissionId: string
-): Promise<ActionResult<{ submittedAt: string }>> {
+): Promise<
+  ActionResult<{
+    submittedAt: string;
+    autoChecked: number;
+    correct: number;
+    totalTasks: number;
+  }>
+> {
   const student = await getStudentWithTeacher();
   if (!student) return { error: 'Доступ только для учеников' };
 
@@ -445,15 +499,206 @@ export async function submitHomeworkAction(
     return { error: 'ДЗ уже отправлено' };
   }
 
-  const submittedAt = new Date();
-  await db.submission.update({
-    where: { id: submission.id },
-    data: { status: 'SUBMITTED', submittedAt },
+  try {
+    // Аккуратно доводим автосейвы до конца: берём все сохранённые ответы
+    const answers = await db.answer.findMany({
+      where: { submissionId: submission.id },
+      include: { task: { select: { id: true, correctAnswer: true } } },
+    });
+
+    const graded = answers.filter((a) => a.task.correctAnswer !== null);
+    let correct = 0;
+
+    // Автопроверка каждого ответа с эталоном (транзакция — атомарно со статусом)
+    const submittedAt = await db.$transaction(async (tx) => {
+      for (const answer of graded) {
+        const isCorrect = checkAnswer(answer.textAnswer, answer.task.correctAnswer ?? '');
+        if (isCorrect) correct += 1;
+        await tx.answer.update({ where: { id: answer.id }, data: { isCorrect } });
+      }
+      const now = new Date();
+      await tx.submission.update({
+        where: { id: submission.id },
+        data: { status: 'SUBMITTED', submittedAt: now },
+      });
+      return now;
+    });
+
+    const totalTasks = await db.task.count({ where: { homeworkId: submission.homeworkId } });
+
+    revalidatePath('/student/homework');
+    revalidatePath(`/student/homework/${submission.homeworkId}`);
+    return {
+      success: true,
+      data: {
+        submittedAt: submittedAt.toISOString(),
+        autoChecked: graded.length,
+        correct,
+        totalTasks,
+      },
+    };
+  } catch (err) {
+    console.error('submitHomeworkAction error:', err);
+    return { error: 'Не удалось отправить ДЗ. Проверьте соединение и попробуйте ещё раз.' };
+  }
+}
+
+// ─────────────── Проверка ДЗ учителем (ПРОМТ-14, часть B) ───────────────
+
+/**
+ * ДЗ учителя для страницы проверки: информация о ДЗ, задачи и список
+ * всех отправленных/проверенных решений учеников с результатом автопроверки.
+ */
+export async function getHomeworkForReviewAction(
+  homeworkId: string
+): Promise<ActionResult<TeacherHomeworkReviewDTO>> {
+  const guard = await requireTeacherProfileId();
+  if ('error' in guard) return { error: guard.error };
+
+  const homework = await db.homework.findFirst({
+    where: { id: homeworkId, teacherId: guard.profileId }, // только своё ДЗ
+    include: {
+      tasks: { orderBy: { order: 'asc' } },
+      submissions: {
+        where: { status: { in: ['SUBMITTED', 'CHECKED'] } },
+        include: {
+          student: { select: { fullName: true } },
+          answers: { select: { isCorrect: true, taskId: true } },
+        },
+        orderBy: { submittedAt: 'asc' },
+      },
+    },
   });
 
-  revalidatePath('/student/homework');
-  revalidatePath(`/student/homework/${submission.homeworkId}`);
-  return { success: true, data: { submittedAt: submittedAt.toISOString() } };
+  if (!homework) {
+    return { error: 'Домашнее задание не найдено или вам недоступно' };
+  }
+
+  const totalTasks = homework.tasks.length;
+
+  return {
+    success: true,
+    data: {
+      id: homework.id,
+      title: homework.title,
+      description: homework.description,
+      deadline: homework.deadline ? homework.deadline.toISOString() : null,
+      createdAt: homework.createdAt.toISOString(),
+      totalTasks,
+      tasks: homework.tasks.map((t) => ({
+        id: t.id,
+        order: t.order,
+        content: t.content,
+        correctAnswer: t.correctAnswer,
+        requirePhoto: t.requirePhoto,
+      })),
+      submissions: homework.submissions.map((s) => {
+        const checkedCount = s.answers.filter((a) => a.isCorrect !== null).length;
+        const correctCount = s.answers.filter((a) => a.isCorrect === true).length;
+        return {
+          id: s.id,
+          studentId: s.studentId,
+          studentName: s.student.fullName,
+          status: s.status as 'SUBMITTED' | 'CHECKED',
+          submittedAt: s.submittedAt ? s.submittedAt.toISOString() : null,
+          grade: s.grade,
+          correctCount,
+          checkedCount,
+          totalTasks,
+        };
+      }),
+    },
+  };
+}
+
+/**
+ * Полное решение одного ученика для модалки проверки:
+ * все ответы с текстом/фото/результатом автопроверки + условия задач.
+ */
+export async function getSubmissionReviewAction(
+  submissionId: string
+): Promise<ActionResult<SubmissionReviewDTO>> {
+  const guard = await requireTeacherProfileId();
+  if ('error' in guard) return { error: guard.error };
+
+  const submission = await db.submission.findFirst({
+    where: { id: submissionId, homework: { teacherId: guard.profileId } },
+    include: {
+      student: { select: { fullName: true, grade: true } },
+      homework: { select: { title: true } },
+      answers: {
+        include: { task: { select: { order: true, content: true, correctAnswer: true, requirePhoto: true } } },
+        orderBy: { task: { order: 'asc' } },
+      },
+    },
+  });
+
+  if (!submission) {
+    return { error: 'Решение не найдено или вам недоступно' };
+  }
+
+  return {
+    success: true,
+    data: {
+      id: submission.id,
+      status: submission.status as 'SUBMITTED' | 'CHECKED',
+      submittedAt: submission.submittedAt ? submission.submittedAt.toISOString() : null,
+      grade: submission.grade,
+      comment: submission.comment,
+      studentName: submission.student.fullName,
+      studentGradeClass: submission.student.grade,
+      homeworkTitle: submission.homework.title,
+      answers: submission.answers.map((a) => ({
+        taskId: a.taskId,
+        taskOrder: a.task.order,
+        taskContent: a.task.content,
+        correctAnswer: a.task.correctAnswer,
+        requirePhoto: a.task.requirePhoto,
+        textAnswer: a.textAnswer,
+        photoUrl: a.photoUrl,
+        isCorrect: a.isCorrect,
+      })),
+    },
+  };
+}
+
+/**
+ * Выставление оценки учителем: SUBMITTED -> CHECKED, сохраняет grade и комментарий.
+ * Повторная проверка (изменение оценки) также разрешена — статус остаётся CHECKED.
+ */
+export async function gradeSubmissionAction(
+  submissionId: string,
+  data: unknown
+): Promise<ActionResult<{ grade: string }>> {
+  const guard = await requireTeacherProfileId();
+  if ('error' in guard) return { error: guard.error };
+
+  const parsed = gradeSubmissionSchema.safeParse(data);
+  if (!parsed.success) {
+    return { error: parsed.error.errors[0]?.message ?? 'Ошибка валидации оценки' };
+  }
+
+  const submission = await db.submission.findFirst({
+    where: { id: submissionId, homework: { teacherId: guard.profileId } },
+  });
+  if (!submission) return { error: 'Решение не найдено или вам недоступно' };
+  if (submission.status === 'DRAFT') {
+    return { error: 'Ученик ещё не отправил работу — проверять нечего' };
+  }
+
+  try {
+    await db.submission.update({
+      where: { id: submission.id },
+      data: { status: 'CHECKED', grade: parsed.data.grade, comment: parsed.data.comment ?? null },
+    });
+    revalidatePath(`/teacher/homework/${submission.homeworkId}`);
+    revalidatePath('/teacher/homework');
+    revalidatePath('/student/homework');
+    return { success: true, data: { grade: parsed.data.grade } };
+  } catch (err) {
+    console.error('gradeSubmissionAction error:', err);
+    return { error: 'Не удалось сохранить оценку. Попробуйте ещё раз.' };
+  }
 }
 
 /**

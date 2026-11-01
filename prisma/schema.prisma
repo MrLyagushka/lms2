@@ -101,6 +101,7 @@ model Submission {
   status      String    @default("DRAFT") // 'DRAFT' | 'SUBMITTED' | 'CHECKED'
   submittedAt DateTime?
   grade       String? // итоговая оценка (число или строка — на усмотрение учителя)
+  comment     String? // комментарий учителя при проверке (ПРОМТ-14)
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
