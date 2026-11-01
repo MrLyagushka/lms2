@@ -1,18 +1,24 @@
 // src/server/homework.actions.ts
 // Server Actions для домашнего задания: создание (транзакция Homework + Task),
-// список ДЗ учителя, получение одного ДЗ с задачами, удаление.
+// список ДЗ учителя, получение одного ДЗ с задачами, удаление,
+// решение ДЗ учеником (getHomeworkForStudentAction / saveAnswerAction /
+// submitHomeworkAction / uploadPhotoAction).
 
 'use server';
 
+import { randomUUID } from 'crypto';
+import { mkdir, writeFile } from 'fs/promises';
+import path from 'path';
 import { revalidatePath } from 'next/cache';
 import { db } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth';
-import { createHomeworkSchema } from '@/validators/homework.validator';
+import { createHomeworkSchema, saveAnswerSchema } from '@/validators/homework.validator';
 import type {
   ActionResult,
   HomeworkItemDTO,
   HomeworkDetailDTO,
   StudentHomeworkItemDTO,
+  StudentHomeworkSolveDTO,
   StudentHomeworkStatus,
 } from '@/types';
 
@@ -264,4 +270,219 @@ export async function getStudentHomeworksAction(): Promise<
     success: true,
     data: { teacherName: studentProfile.teacher.fullName, homeworks: items },
   };
+}
+
+// ─────────────── Решение ДЗ учеником ───────────────
+
+/** Возвращает профиль текущего ученика вместе с привязанным учителем (или null). */
+async function getStudentWithTeacher() {
+  const guard = await requireStudentProfileId();
+  if ('error' in guard) return null;
+  const profile = await db.studentProfile.findUnique({
+    where: { id: guard.studentProfileId },
+    include: { teacher: { select: { id: true, fullName: true } } },
+  });
+  return profile;
+}
+
+const ALLOWED_IMAGE_TYPES: Record<string, string> = {
+  'image/png': '.png',
+  'image/jpeg': '.jpg',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+};
+const MAX_PHOTO_BYTES = 4 * 1024 * 1024; // 4 МБ (serverActions bodySizeLimit = 5mb)
+
+/**
+ * ДЗ для страницы решения: задачи + текущая Submission ученика (если есть).
+ * Проверка доступа: ДЗ должно принадлежать учителю, к которому привязан ученик.
+ */
+export async function getHomeworkForStudentAction(
+  homeworkId: string
+): Promise<ActionResult<StudentHomeworkSolveDTO>> {
+  const student = await getStudentWithTeacher();
+  if (!student) return { error: 'Доступ только для учеников' };
+  if (!student.teacher) {
+    return { error: 'Учитель не привязан — домашних заданий нет' };
+  }
+
+  const homework = await db.homework.findFirst({
+    where: { id: homeworkId, teacherId: student.teacher.id }, // ДЗ именно этого учителя
+    include: {
+      tasks: { orderBy: { order: 'asc' } },
+      submissions: {
+        where: { studentId: student.id },
+        include: { answers: true },
+        take: 1,
+      },
+    },
+  });
+
+  if (!homework) {
+    return { error: 'Домашнее задание не найдено или вам недоступно' };
+  }
+
+  const submission = homework.submissions[0];
+
+  const data: StudentHomeworkSolveDTO = {
+    id: homework.id,
+    title: homework.title,
+    description: homework.description,
+    deadline: homework.deadline ? homework.deadline.toISOString() : null,
+    teacherName: student.teacher.fullName,
+    tasks: homework.tasks.map((t) => ({
+      id: t.id,
+      order: t.order,
+      content: t.content,
+      correctAnswer: t.correctAnswer,
+      requirePhoto: t.requirePhoto,
+    })),
+    submission: submission
+      ? {
+          id: submission.id,
+          status: submission.status as 'DRAFT' | 'SUBMITTED' | 'CHECKED',
+          submittedAt: submission.submittedAt ? submission.submittedAt.toISOString() : null,
+          grade: submission.grade,
+          answers: submission.answers.map((a) => ({
+            taskId: a.taskId,
+            textAnswer: a.textAnswer,
+            photoUrl: a.photoUrl,
+            isCorrect: a.isCorrect,
+          })),
+        }
+      : null,
+  };
+
+  return { success: true, data };
+}
+
+/**
+ * Сохраняет/обновляет один ответ ученика (textAnswer и/или photoUrl).
+ * Если Submission ещё нет — создаёт её со статусом DRAFT (ученик «начал решать»).
+ * Если ДЗ уже отправлено/проверено — сохранение запрещено.
+ */
+export async function saveAnswerAction(
+  submissionId: string | null,
+  taskId: string,
+  data: unknown
+): Promise<ActionResult<{ submissionId: string }>> {
+  const student = await getStudentWithTeacher();
+  if (!student) return { error: 'Доступ только для учеников' };
+
+  const parsed = saveAnswerSchema.safeParse(data);
+  if (!parsed.success) {
+    return { error: parsed.error.errors[0]?.message ?? 'Ошибка валидации ответа' };
+  }
+
+  // Задача должна относиться к ДЗ текущего учителя ученика
+  const task = await db.task.findFirst({
+    where: { id: taskId, homework: { teacherId: student.teacherId } },
+    select: { id: true, homeworkId: true },
+  });
+  if (!task) return { error: 'Задача не найдена или вам недоступна' };
+
+  const { textAnswer, photoUrl } = parsed.data;
+
+  try {
+    let submission;
+
+    if (submissionId) {
+      submission = await db.submission.findFirst({
+        where: { id: submissionId, studentId: student.id, homeworkId: task.homeworkId },
+      });
+      if (!submission) return { error: 'Черновик решения не найден' };
+      if (submission.status !== 'DRAFT') {
+        return { error: 'ДЗ уже отправлено — изменять ответы нельзя' };
+      }
+    } else {
+      // upsert по @@unique([studentId, homeworkId]) — защита от гонки автосейвов
+      submission = await db.submission.upsert({
+        where: { studentId_homeworkId: { studentId: student.id, homeworkId: task.homeworkId } },
+        create: { studentId: student.id, homeworkId: task.homeworkId, status: 'DRAFT' },
+        update: {},
+      });
+      if (submission.status !== 'DRAFT') {
+        return { error: 'ДЗ уже отправлено — изменять ответы нельзя' };
+      }
+    }
+
+    await db.answer.upsert({
+      where: { submissionId_taskId: { submissionId: submission.id, taskId: task.id } },
+      create: {
+        submissionId: submission.id,
+        taskId: task.id,
+        textAnswer: textAnswer ?? null,
+        photoUrl: photoUrl ?? null,
+      },
+      update: {
+        ...(textAnswer !== undefined && textAnswer !== null ? { textAnswer } : {}),
+        ...(photoUrl !== undefined ? { photoUrl: photoUrl ?? null } : {}),
+      },
+    });
+
+    revalidatePath('/student/homework');
+    return { success: true, data: { submissionId: submission.id } };
+  } catch (err) {
+    console.error('saveAnswerAction error:', err);
+    return { error: 'Не удалось сохранить ответ. Попробуйте ещё раз.' };
+  }
+}
+
+/**
+ * Отправка ДЗ: DRAFT -> SUBMITTED, фиксируется submittedAt.
+ */
+export async function submitHomeworkAction(
+  submissionId: string
+): Promise<ActionResult<{ submittedAt: string }>> {
+  const student = await getStudentWithTeacher();
+  if (!student) return { error: 'Доступ только для учеников' };
+
+  const submission = await db.submission.findFirst({
+    where: { id: submissionId, studentId: student.id },
+  });
+  if (!submission) return { error: 'Решение не найдено' };
+  if (submission.status === 'SUBMITTED' || submission.status === 'CHECKED') {
+    return { error: 'ДЗ уже отправлено' };
+  }
+
+  const submittedAt = new Date();
+  await db.submission.update({
+    where: { id: submission.id },
+    data: { status: 'SUBMITTED', submittedAt },
+  });
+
+  revalidatePath('/student/homework');
+  revalidatePath(`/student/homework/${submission.homeworkId}`);
+  return { success: true, data: { submittedAt: submittedAt.toISOString() } };
+}
+
+/**
+ * Загрузка фото-ответа: сохраняет файл локально в public/uploads/,
+ * возвращает публичный URL (/uploads/<имя>). Без S3 — для простоты.
+ */
+export async function uploadPhotoAction(file: File): Promise<ActionResult<{ url: string }>> {
+  const session = await getSessionUser();
+  if (!session) return { error: 'Не авторизован' };
+
+  if (file.size > MAX_PHOTO_BYTES) {
+    return { error: 'Фото слишком большое (максимум 4 МБ)' };
+  }
+  const ext = ALLOWED_IMAGE_TYPES[file.type];
+  if (!ext) {
+    return { error: 'Можно загружать только изображения: PNG, JPEG, WEBP, GIF' };
+  }
+
+  try {
+    const uploadsDir = path.join(process.cwd(), 'public', 'uploads');
+    await mkdir(uploadsDir, { recursive: true });
+
+    const fileName = `${Date.now()}-${randomUUID()}${ext}`;
+    const buffer = Buffer.from(await file.arrayBuffer());
+    await writeFile(path.join(uploadsDir, fileName), buffer);
+
+    return { success: true, data: { url: `/uploads/${fileName}` } };
+  } catch (err) {
+    console.error('uploadPhotoAction error:', err);
+    return { error: 'Не удалось загрузить фото. Попробуйте ещё раз.' };
+  }
 }

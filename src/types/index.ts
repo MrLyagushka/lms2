@@ -92,3 +92,37 @@ export interface StudentHomeworkItemDTO {
   status: StudentHomeworkStatus;
   grade: string | null; // оценка, если ДЗ проверено
 }
+
+/**
+ * Ответ ученика на задачу (в рамках Submission).
+ */
+export interface AnswerItemDTO {
+  taskId: string;
+  textAnswer: string | null;
+  photoUrl: string | null;
+  isCorrect: boolean | null; // результат автопроверки (null — не проверено)
+}
+
+/**
+ * Текущая Submission ученика на конкретное ДЗ (или null, если ещё не начинал).
+ */
+export interface StudentSubmissionDTO {
+  id: string;
+  status: SubmissionStatus; // 'DRAFT' | 'SUBMITTED' | 'CHECKED'
+  submittedAt: string | null; // ISO-string
+  grade: string | null;
+  answers: AnswerItemDTO[];
+}
+
+/**
+ * DTO ДЗ для страницы решения учеником: задачи + текущая submission.
+ */
+export interface StudentHomeworkSolveDTO {
+  id: string;
+  title: string;
+  description: string | null;
+  deadline: string | null; // ISO-string
+  teacherName: string;
+  tasks: TaskItemDTO[];
+  submission: StudentSubmissionDTO | null;
+}

@@ -34,3 +34,14 @@ export const createHomeworkSchema = z.object({
 
 export type TaskInput = z.infer<typeof taskSchema>;
 export type CreateHomeworkInput = z.infer<typeof createHomeworkSchema>;
+
+/**
+ * Сохранение одного ответа ученика (автосейв).
+ * Оба поля опциональны — можно сохранить только текст или только фото.
+ */
+export const saveAnswerSchema = z.object({
+  textAnswer: z.string().max(20000, 'Слишком длинный ответ').nullish(),
+  photoUrl: z.string().max(500, 'Некорректный URL фото').nullish(),
+});
+
+export type SaveAnswerInput = z.infer<typeof saveAnswerSchema>;
