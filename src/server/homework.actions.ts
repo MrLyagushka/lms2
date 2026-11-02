@@ -417,6 +417,7 @@ export async function saveAnswerAction(
   }
 
   // Задача должна относиться к ДЗ текущего учителя ученика
+  if (!student.teacherId) return { error: 'Учитель не привязан — домашних заданий нет' };
   const task = await db.task.findFirst({
     where: { id: taskId, homework: { teacherId: student.teacherId } },
     select: { id: true, homeworkId: true },

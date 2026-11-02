@@ -17,6 +17,21 @@ export const metadata: Metadata = {
   },
   description:
     'Платформа для обучения: домашние задания с математическими формулами, привязка учеников к учителям, автопроверка работ.',
+  keywords: ['домашние задания', 'обучение', 'математика', 'LaTeX', 'учитель', 'ученик'],
+  icons: {
+    icon: [
+      { url: '/icon.svg', type: 'image/svg+xml' },
+      { url: '/favicon.ico', sizes: 'any' },
+    ],
+    apple: '/apple-icon.png',
+  },
+  manifest: undefined,
+  openGraph: {
+    title: 'Learning Platform',
+    description: 'Домашние задания с формулами, автосохранением и автопроверкой.',
+    type: 'website',
+    locale: 'ru_RU',
+  },
 };
 
 interface RootLayoutProps {
